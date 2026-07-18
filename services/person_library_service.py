@@ -1,8 +1,14 @@
-from pathlib import Path
+import json
 import shutil
 import numpy as np
 
-from config import PERSON_LIBRARY_DIR
+from config import (
+    PERSON_LIBRARY_DIR,
+    PERSON_LIBRARY_SETTINGS_PATH,
+    PERSON_SIMILARITY_MARGIN,
+    PERSON_SIMILARITY_THRESHOLD,
+    PERSON_SIMILARITY_THRESHOLD_MIN,
+)
 from sklearn.metrics.pairwise import cosine_similarity
 
 
@@ -54,7 +60,10 @@ def load_all_persons():
 
     persons = []
 
-    for folder in sorted(PERSON_LIBRARY_DIR.glob("Person*")):
+    for folder in sorted(PERSON_LIBRARY_DIR.iterdir()):
+
+        if not folder.is_dir():
+            continue
 
         image = folder / "representative.jpg"
 
@@ -74,7 +83,44 @@ def load_all_persons():
 
     return persons
 
-def find_similar_actor(embedding, threshold=0.65):
+def get_similarity_threshold():
+
+    if not PERSON_LIBRARY_SETTINGS_PATH.exists():
+        return PERSON_SIMILARITY_THRESHOLD
+
+    try:
+        settings = json.loads(
+            PERSON_LIBRARY_SETTINGS_PATH.read_text(encoding="utf-8")
+        )
+        return float(settings["similarity_threshold"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+        return PERSON_SIMILARITY_THRESHOLD
+
+
+def calibrate_similarity_threshold(similarity):
+
+    current_threshold = get_similarity_threshold()
+    adjusted_threshold = max(
+        PERSON_SIMILARITY_THRESHOLD_MIN,
+        min(current_threshold, similarity - PERSON_SIMILARITY_MARGIN)
+    )
+
+    PERSON_LIBRARY_SETTINGS_PATH.write_text(
+        json.dumps(
+            {"similarity_threshold": adjusted_threshold},
+            ensure_ascii=False,
+            indent=2
+        ),
+        encoding="utf-8"
+    )
+
+    return adjusted_threshold
+
+
+def find_similar_actor(embedding, threshold=None):
+
+    if threshold is None:
+        threshold = get_similarity_threshold()
 
     actors = load_all_persons()
 

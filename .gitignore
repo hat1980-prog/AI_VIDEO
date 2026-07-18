@@ -1,4 +1,6 @@
+.venv/
 venv/
+
 __pycache__/
 *.pyc
 
@@ -7,12 +9,15 @@ frames/
 faces/
 embeddings/
 actors/
-
-database/*.db
+person_library/
+excluded_faces/
+transcripts/
+tags/
+database/person_library_settings.json
 
 *.mp4
 *.avi
+*.mov
 *.mkv
-*.zip
 
-.env
+.gradio/

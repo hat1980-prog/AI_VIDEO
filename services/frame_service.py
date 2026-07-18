@@ -2,16 +2,19 @@ from pathlib import Path
 import subprocess
 import shutil
 
-from config import VIDEOS_DIR
 from config import FRAMES_DIR
 from config import FRAME_FPS
+from services.video_service import get_video_id, get_video_path
 
 
 def extract_frames(video_name):
 
-    video_path = VIDEOS_DIR / video_name
+    video_path = get_video_path(video_name)
 
-    output_dir = FRAMES_DIR / Path(video_name).stem
+    if video_path is None:
+        return False, "動画ファイルが見つかりません"
+
+    output_dir = FRAMES_DIR / get_video_id(video_name)
 
     if output_dir.exists():
         shutil.rmtree(output_dir)

@@ -1,112 +1,118 @@
+import json
 from pathlib import Path
 import shutil
 
 import numpy as np
 from sklearn.cluster import DBSCAN
 
-from config import EMBEDDINGS_DIR
-from config import FACES_DIR
+from config import CLUSTER_EPS, EMBEDDINGS_DIR, FACES_DIR
+from services.video_service import get_video_id
 
 
 def cluster_faces(video_name):
-
     if not video_name:
         return "動画を選択してください"
 
-    video_name = Path(video_name).stem
+    video_id = get_video_id(video_name)
 
-    embedding_dir = EMBEDDINGS_DIR / video_name
-    face_dir = FACES_DIR / video_name
+    if video_id is None:
+        return "動画ファイルが見つかりません"
+
+    embedding_dir = EMBEDDINGS_DIR / video_id
+    face_dir = FACES_DIR / video_id
 
     if not embedding_dir.exists():
         return "Embeddingフォルダがありません"
 
     embedding_files = sorted(embedding_dir.glob("*.npy"))
 
-    if len(embedding_files) == 0:
+    if not embedding_files:
         return "Embeddingがありません"
+
+    assignments_path = face_dir / "assignments.json"
+
+    if assignments_path.exists():
+        assignments = json.loads(assignments_path.read_text(encoding="utf-8"))
+    else:
+        assignments = {}
 
     embeddings = []
     image_names = []
 
-    for emb_file in embedding_files:
+    for embedding_file in embedding_files:
+        image_name = f"{embedding_file.stem}.jpg"
 
-        embeddings.append(np.load(emb_file))
+        if image_name in assignments:
+            continue
 
-        image_names.append(emb_file.stem + ".jpg")
+        embeddings.append(np.load(embedding_file))
+        image_names.append(image_name)
 
-    labels = DBSCAN(
-        eps=0.55,
-        min_samples=2,
-        metric="cosine"
-    ).fit_predict(embeddings)
+    labels = []
 
-    # ---------- 古いPersonフォルダ削除 ----------
-    for folder in face_dir.glob("Person_*"):
-        shutil.rmtree(folder)
+    if embeddings:
+        labels = DBSCAN(
+            eps=CLUSTER_EPS,
+            min_samples=2,
+            metric="cosine"
+        ).fit_predict(embeddings)
+
+    for pattern in ("Actor_*", "Person_*"):
+        for folder in face_dir.glob(pattern):
+            shutil.rmtree(folder)
 
     unknown_dir = face_dir / "Unknown"
 
     if unknown_dir.exists():
         shutil.rmtree(unknown_dir)
 
-    # ---------- フォルダ作成 ----------
-    created = set()
+    created = set(assignments.values())
+
+    for actor_name in created:
+        (face_dir / f"Actor_{actor_name}").mkdir(exist_ok=True)
 
     for label in labels:
-
         if label == -1:
-
-            (face_dir / "Unknown").mkdir(
-                exist_ok=True
-            )
-
+            (face_dir / "Unknown").mkdir(exist_ok=True)
         else:
+            (face_dir / f"Person_{label}").mkdir(exist_ok=True)
+            created.add(f"Person_{label}")
 
-            folder = face_dir / f"Person_{label}"
-
-            folder.mkdir(
-                exist_ok=True
-            )
-
-            created.add(label)
-
-    # ---------- 顔画像コピー ----------
     result = []
 
+    for image_name, actor_name in assignments.items():
+        source = face_dir / image_name
+
+        if not source.exists():
+            continue
+
+        shutil.copy2(source, face_dir / f"Actor_{actor_name}" / image_name)
+        result.append(f"{image_name} → {actor_name}")
+
     for image_name, label in zip(image_names, labels):
+        source = face_dir / image_name
 
-        src = face_dir / image_name
-
-        if not src.exists():
+        if not source.exists():
             continue
 
         if label == -1:
-
-            dst = face_dir / "Unknown" / image_name
-
+            destination = face_dir / "Unknown" / image_name
             person = "Unknown"
-
         else:
-
-            dst = face_dir / f"Person_{label}" / image_name
-
+            destination = face_dir / f"Person_{label}" / image_name
             person = f"Person_{label}"
 
-        shutil.copy2(src, dst)
-
-        result.append(
-            f"{image_name} → {person}"
-        )
+        shutil.copy2(source, destination)
+        result.append(f"{image_name} → {person}")
 
     summary = [
         "=== Cluster Result ===",
         "",
-        f"顔画像 : {len(image_names)}",
+        f"顔画像 : {len(embedding_files)}",
+        f"出演者ライブラリ一致 : {len(assignments)}",
         f"人物数 : {len(created)}",
-        ""
+        "",
     ]
-
     summary.extend(result)
 
     return "\n".join(summary)
