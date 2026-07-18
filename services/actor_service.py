@@ -5,7 +5,7 @@ import shutil
 import numpy as np
 
 from config import PERSON_LIBRARY_DIR
-from services.person_library_service import calibrate_similarity_threshold
+from services.person_library_service import calibrate_similarity_threshold, invalidate_person_index
 
 
 def _actor_dir(actor_name):
@@ -56,6 +56,7 @@ def _update_actor_embedding(actor_name):
         return False
 
     np.save(actor_dir / "representative.npy", mean_embedding / norm)
+    invalidate_person_index()
     return True
 
 

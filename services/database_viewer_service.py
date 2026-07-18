@@ -1,6 +1,5 @@
-import sqlite3
-
 from config import DATABASE_DIR
+from database.db import get_connection
 
 
 DATABASE_PATH = DATABASE_DIR / "metadata.db"
@@ -10,7 +9,7 @@ def get_database_tables():
     if not DATABASE_PATH.exists():
         return []
 
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
 
     try:
         rows = conn.execute(
@@ -28,7 +27,7 @@ def get_table_data(table_name, limit=500):
     if table_name not in tables:
         return [], [], "表示できるテーブルを選択してください"
 
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
 
     try:
         cursor = conn.execute(f'PRAGMA table_info("{table_name}")')

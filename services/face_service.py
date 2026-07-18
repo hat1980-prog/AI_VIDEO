@@ -77,6 +77,7 @@ def extract_faces(video_name, progress_callback=None):
     skipped_small_faces = 0
     skipped_excluded_faces = 0
     matched_actors = {}
+    updated_actors = set()
 
     frame_files = sorted(frame_dir.glob("*.jpg"))
 
@@ -151,6 +152,8 @@ def extract_faces(video_name, progress_callback=None):
                 actor_name = actor["name"]
                 matched_actors[face_filename] = actor_name
 
+            updated_actors.add(actor_name)
+
             actor_faces = (
                 PERSON_LIBRARY_DIR /
                 actor_name /
@@ -175,7 +178,7 @@ def extract_faces(video_name, progress_callback=None):
         if progress_callback:
             progress_callback(frame_index / total_frames)
 
-    if count > 0:
+    for actor_name in updated_actors:
         update_actor_embedding(actor_name)
 
     (face_dir / "assignments.json").write_text(

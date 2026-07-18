@@ -15,7 +15,7 @@ DATABASE_DIR.mkdir(exist_ok=True)
 TRANSCRIPTS_DIR.mkdir(exist_ok=True)
 
 # 何秒ごとにフレームを抽出するか
-FRAME_INTERVAL = 60
+FRAME_INTERVAL = 180
 
 FRAME_FPS = f"1/{FRAME_INTERVAL}"
 
