@@ -32,7 +32,10 @@ def get_table_data(table_name, limit=500):
     try:
         cursor = conn.execute(f'PRAGMA table_info("{table_name}")')
         headers = [row[1] for row in cursor.fetchall()]
-        rows = conn.execute(f'SELECT * FROM "{table_name}" LIMIT ?', (limit,)).fetchall()
+        rows = [
+            list(row)
+            for row in conn.execute(f'SELECT * FROM "{table_name}" LIMIT ?', (limit,)).fetchall()
+        ]
     finally:
         conn.close()
 

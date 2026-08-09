@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import re
 import shutil
 
@@ -77,6 +78,10 @@ def _merge_actor_files(source_dir, target_dir):
     source_faces = source_dir / "faces"
     target_faces = target_dir / "faces"
     target_faces.mkdir(parents=True, exist_ok=True)
+    source_metadata_path = source_dir / "faces_metadata.json"
+    target_metadata_path = target_dir / "faces_metadata.json"
+    source_metadata = json.loads(source_metadata_path.read_text(encoding="utf-8")) if source_metadata_path.exists() else {}
+    target_metadata = json.loads(target_metadata_path.read_text(encoding="utf-8")) if target_metadata_path.exists() else {}
 
     moved = 0
 
@@ -95,11 +100,20 @@ def _merge_actor_files(source_dir, target_dir):
             if embedding.exists():
                 shutil.move(str(embedding), str(destination.with_suffix(".npy")))
 
+            target_metadata[destination.name] = source_metadata.get(
+                face_path.name,
+                {"video_name": "元動画情報なし", "video_path": ""},
+            )
+
             moved += 1
 
     source_name = source_dir.name
     target_name = target_dir.name
     shutil.rmtree(source_dir)
+    target_metadata_path.write_text(
+        json.dumps(target_metadata, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
     _update_actor_embedding(target_name)
 
     return source_name, moved
@@ -107,21 +121,29 @@ def _merge_actor_files(source_dir, target_dir):
 
 def reclassify_actors(threshold, progress_callback=None):
     merged = []
+    embeddings = {}
 
-    while True:
-        actor_names = load_actor_list()
+    for actor_name in load_actor_list():
+        embedding_path = _actor_dir(actor_name) / "representative.npy"
+
+        if not embedding_path.exists():
+            continue
+
+        embedding = np.load(embedding_path)
+        norm = np.linalg.norm(embedding)
+
+        if norm > 0:
+            embeddings[actor_name] = embedding / norm
+
+    while len(embeddings) > 1:
+        actor_names = sorted(embeddings, key=str.casefold)
+        matrix = np.stack([embeddings[name] for name in actor_names])
         merged_pair = None
 
-        for target_name in actor_names:
-            target_dir = _actor_dir(target_name)
-            target_embedding_path = target_dir / "representative.npy"
+        for target_index, target_name in enumerate(actor_names):
+            similarities = matrix @ matrix[target_index]
 
-            if not target_embedding_path.exists():
-                continue
-
-            target_embedding = np.load(target_embedding_path)
-
-            for source_name in actor_names:
+            for source_index, source_name in enumerate(actor_names):
                 if source_name == target_name:
                     continue
 
@@ -131,16 +153,10 @@ def reclassify_actors(threshold, progress_callback=None):
                 ):
                     continue
 
-                source_dir = _actor_dir(source_name)
-                source_embedding_path = source_dir / "representative.npy"
+                if similarities[source_index] >= threshold:
+                    source_dir = _actor_dir(source_name)
+                    target_dir = _actor_dir(target_name)
 
-                if not source_embedding_path.exists():
-                    continue
-
-                source_embedding = np.load(source_embedding_path)
-                similarity = _similarity(source_embedding, target_embedding)
-
-                if similarity is not None and similarity >= threshold:
                     if (
                         _is_generated_actor_name(target_name)
                         and not _is_generated_actor_name(source_name)
@@ -158,6 +174,21 @@ def reclassify_actors(threshold, progress_callback=None):
 
         source_name, _ = _merge_actor_files(*merged_pair)
         merged.append(source_name)
+        embeddings.pop(source_name, None)
+
+        target_name = merged_pair[1].name
+        target_embedding_path = merged_pair[1] / "representative.npy"
+
+        if target_embedding_path.exists():
+            target_embedding = np.load(target_embedding_path)
+            norm = np.linalg.norm(target_embedding)
+
+            if norm > 0:
+                embeddings[target_name] = target_embedding / norm
+            else:
+                embeddings.pop(target_name, None)
+        else:
+            embeddings.pop(target_name, None)
 
         if progress_callback:
             progress_callback(len(merged))
@@ -165,22 +196,84 @@ def reclassify_actors(threshold, progress_callback=None):
     return merged
 
 
-def _actor_records():
+def _actor_face_paths(actor_dir, source_video_path=None):
+    faces_dir = actor_dir / "faces"
+    faces = sorted(faces_dir.glob("*.jpg")) if faces_dir.exists() else []
+
+    if not source_video_path:
+        return faces
+
+    metadata, _ = _load_face_metadata(actor_dir)
+    source_video_name = Path(source_video_path).name.casefold()
+    return [
+        face for face in faces
+        if Path(
+            metadata.get(face.name, {}).get("video_name")
+            or metadata.get(face.name, {}).get("video_path", "")
+        ).name.casefold() == source_video_name
+    ]
+
+
+def get_actor_video_choices(actor_name_filter=None):
+    records = {}
+
+    for actor_dir in PERSON_LIBRARY_DIR.iterdir():
+        if not actor_dir.is_dir():
+            continue
+
+        if actor_name_filter and actor_dir.name != actor_name_filter:
+            continue
+
+        metadata, _ = _load_face_metadata(actor_dir)
+
+        for face_name, info in metadata.items():
+            video_path = info.get("video_path")
+
+            if not video_path:
+                continue
+
+            video_name = Path(info.get("video_name") or video_path).name
+            key = video_name.casefold()
+            face_path = actor_dir / "faces" / face_name
+            modified_at = face_path.stat().st_mtime_ns if face_path.exists() else 0
+            current = records.get(key)
+
+            if current is None or modified_at > current[2]:
+                records[key] = (video_name, video_path, modified_at)
+
+    return [
+        (video_name, video_path)
+        for video_name, video_path, _ in sorted(
+            records.values(), key=lambda record: (record[0].casefold(), record[1])
+        )
+    ]
+
+
+def _actor_records(source_video_path=None):
     records = []
 
     for actor_dir in PERSON_LIBRARY_DIR.iterdir():
         if not actor_dir.is_dir() or not _representative_image(actor_dir):
             continue
 
-        faces_dir = actor_dir / "faces"
-        face_count = len(list(faces_dir.glob("*.jpg"))) if faces_dir.exists() else 0
+        face_count = len(_actor_face_paths(actor_dir, source_video_path))
+
+        if source_video_path and face_count == 0:
+            continue
+
         records.append((actor_dir.name, face_count))
 
     return records
 
 
-def load_actor_list(sort_by="name", sort_order="asc"):
-    records = _actor_records()
+def load_actor_list(
+    sort_by="name", sort_order="asc", source_video_path=None, actor_name_filter=None
+):
+    records = _actor_records(source_video_path)
+
+    if actor_name_filter:
+        records = [record for record in records if record[0] == actor_name_filter]
+
     reverse = sort_order == "desc"
 
     if sort_by == "count":
@@ -191,32 +284,265 @@ def load_actor_list(sort_by="name", sort_order="asc"):
     return [name for name, _ in records]
 
 
-def load_actor_gallery(sort_by="name", sort_order="asc"):
+def load_actor_gallery(
+    sort_by="name", sort_order="asc", source_video_path=None, actor_name_filter=None
+):
     gallery = []
 
-    for actor_name in load_actor_list(sort_by, sort_order):
-        image = _representative_image(PERSON_LIBRARY_DIR / actor_name)
+    for actor_name in load_actor_list(
+        sort_by, sort_order, source_video_path, actor_name_filter
+    ):
+        actor_dir = PERSON_LIBRARY_DIR / actor_name
+        filtered_faces = _actor_face_paths(actor_dir, source_video_path)
+        image = filtered_faces[0] if source_video_path else _representative_image(actor_dir)
         gallery.append((str(image), actor_name))
 
     return gallery
 
 
-def load_actor_library(sort_by="name", sort_order="asc"):
-    gallery = load_actor_gallery(sort_by, sort_order)
+def load_actor_library(
+    sort_by="name", sort_order="asc", source_video_path=None, actor_name_filter=None
+):
+    gallery = load_actor_gallery(sort_by, sort_order, source_video_path, actor_name_filter)
     return gallery, f"出演者数：{len(gallery)}"
 
 
-def get_actor_details(actor_name):
+def get_actor_details(actor_name, source_video_path=None):
     actor_dir = _actor_dir(actor_name)
 
     if actor_dir is None:
         return "", [], "出演者を選択してください"
 
-    faces_dir = actor_dir / "faces"
-    faces = sorted(faces_dir.glob("*.jpg")) if faces_dir.exists() else []
-    gallery = [(str(face), face.name) for face in faces]
+    faces = _actor_face_paths(actor_dir, source_video_path)
+    metadata_path = actor_dir / "faces_metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    gallery = [
+        (
+            str(face),
+            (
+                f"{face.name} | 元動画: {metadata.get(face.name, {}).get('video_name', '元動画情報なし')}"
+                f" | 抽出位置: {metadata.get(face.name, {}).get('source_time_label', '情報なし')}"
+            ),
+        )
+        for face in faces
+    ]
 
     return actor_dir.name, gallery, f"顔画像：{len(gallery)}枚"
+
+
+def _load_face_metadata(actor_dir):
+    metadata_path = actor_dir / "faces_metadata.json"
+
+    if not metadata_path.exists():
+        return {}, metadata_path
+
+    return json.loads(metadata_path.read_text(encoding="utf-8")), metadata_path
+
+
+def _refresh_actor_after_face_change(actor_dir):
+    faces_dir = actor_dir / "faces"
+    faces = sorted(faces_dir.glob("*.jpg")) if faces_dir.exists() else []
+
+    if not faces:
+        shutil.rmtree(actor_dir)
+        invalidate_person_index()
+        return False
+
+    shutil.copy2(faces[0], actor_dir / "representative.jpg")
+    _update_actor_embedding(actor_dir.name)
+    return True
+
+
+def _validate_actor_face(actor_name, selected_face_path):
+    actor_dir = _actor_dir(actor_name)
+
+    if actor_dir is None or not selected_face_path:
+        return None, None
+
+    face_path = Path(selected_face_path)
+    faces_dir = actor_dir / "faces"
+
+    try:
+        face_path.resolve().relative_to(faces_dir.resolve())
+    except ValueError:
+        return None, None
+
+    if face_path.suffix.lower() != ".jpg" or not face_path.is_file():
+        return None, None
+
+    return actor_dir, face_path
+
+
+def remove_actor_face(actor_name, selected_face_path):
+    actor_dir, face_path = _validate_actor_face(actor_name, selected_face_path)
+
+    if actor_dir is None:
+        return "出演者ライブラリから除外する顔画像を選択してください"
+
+    metadata, metadata_path = _load_face_metadata(actor_dir)
+    embedding_path = face_path.with_suffix(".npy")
+    face_path.unlink()
+
+    if embedding_path.exists():
+        embedding_path.unlink()
+
+    metadata.pop(face_path.name, None)
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    actor_exists = _refresh_actor_after_face_change(actor_dir)
+
+    if actor_exists:
+        return f"{face_path.name} を {actor_name} の出演者ライブラリから除外しました"
+
+    return f"{face_path.name} を除外し、顔画像がなくなったため {actor_name} を削除しました"
+
+
+def set_actor_representative_image(actor_name, selected_face_path):
+    actor_dir, face_path = _validate_actor_face(actor_name, selected_face_path)
+
+    if actor_dir is None:
+        return "サムネイルに設定する顔画像を選択してください"
+
+    shutil.copy2(face_path, actor_dir / "representative.jpg")
+    return f"{actor_name} のサムネイルを {face_path.name} に変更しました"
+
+
+def reclassify_actor_face(source_actor_name, selected_face_path, target_actor_name):
+    source_dir, face_path = _validate_actor_face(source_actor_name, selected_face_path)
+
+    if source_dir is None:
+        return "再分類する顔画像を選択してください"
+
+    target_actor_name, error = _validate_reclassification_target(target_actor_name)
+
+    if error:
+        return error
+
+    if target_actor_name == source_actor_name:
+        return "再分類先には別の出演者を選択してください"
+
+    target_dir = PERSON_LIBRARY_DIR / target_actor_name
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    source_metadata, source_metadata_path = _load_face_metadata(source_dir)
+    target_metadata, target_metadata_path = _load_face_metadata(target_dir)
+    target_faces_dir = target_dir / "faces"
+    target_faces_dir.mkdir(parents=True, exist_ok=True)
+
+    destination = target_faces_dir / face_path.name
+    index = 1
+
+    while destination.exists():
+        destination = target_faces_dir / f"{face_path.stem}_{index}{face_path.suffix}"
+        index += 1
+
+    embedding_path = face_path.with_suffix(".npy")
+    shutil.move(str(face_path), str(destination))
+
+    if embedding_path.exists():
+        shutil.move(str(embedding_path), str(destination.with_suffix(".npy")))
+
+    target_metadata[destination.name] = source_metadata.pop(
+        face_path.name,
+        {"video_name": "元動画情報なし", "video_path": ""},
+    )
+    source_metadata_path.write_text(
+        json.dumps(source_metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    target_metadata_path.write_text(
+        json.dumps(target_metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+    source_exists = _refresh_actor_after_face_change(source_dir)
+    _refresh_actor_after_face_change(target_dir)
+
+    if source_exists:
+        return f"{destination.name} を {source_actor_name} から {target_actor_name} へ再分類しました"
+
+    return f"{destination.name} を {target_actor_name} へ再分類し、空になった {source_actor_name} を削除しました"
+
+
+def _validate_reclassification_target(actor_name):
+    actor_name = (actor_name or "").strip()
+
+    if not actor_name:
+        return None, "移動先の出演者名を入力してください"
+
+    if actor_name in {".", ".."} or re.search(r'[<>:"/\\|?*]', actor_name):
+        return None, "出演者名に使用できない文字が含まれています"
+
+    return actor_name, None
+
+
+def reclassify_actor_faces(source_actor_name, selected_face_paths, target_actor_name):
+    source_dir = _actor_dir(source_actor_name)
+    target_actor_name, error = _validate_reclassification_target(target_actor_name)
+
+    if source_dir is None:
+        return "移動元の出演者を選択してください"
+
+    if error:
+        return error
+
+    if target_actor_name == source_actor_name:
+        return "移動先には別の出演者名を指定してください"
+
+    selected_paths = selected_face_paths or []
+    face_paths = []
+    seen = set()
+
+    for selected_face_path in selected_paths:
+        _, face_path = _validate_actor_face(source_actor_name, selected_face_path)
+
+        if face_path is None or face_path in seen:
+            continue
+
+        seen.add(face_path)
+        face_paths.append(face_path)
+
+    if not face_paths:
+        return "移動する顔画像を1枚以上選択してください"
+
+    target_dir = PERSON_LIBRARY_DIR / target_actor_name
+    target_faces_dir = target_dir / "faces"
+    target_faces_dir.mkdir(parents=True, exist_ok=True)
+    source_metadata, source_metadata_path = _load_face_metadata(source_dir)
+    target_metadata, target_metadata_path = _load_face_metadata(target_dir)
+
+    moved = 0
+
+    for face_path in face_paths:
+        destination = target_faces_dir / face_path.name
+        index = 1
+
+        while destination.exists():
+            destination = target_faces_dir / f"{face_path.stem}_{index}{face_path.suffix}"
+            index += 1
+
+        embedding_path = face_path.with_suffix(".npy")
+        shutil.move(str(face_path), str(destination))
+
+        if embedding_path.exists():
+            shutil.move(str(embedding_path), str(destination.with_suffix(".npy")))
+
+        target_metadata[destination.name] = source_metadata.pop(
+            face_path.name,
+            {"video_name": "元動画情報なし", "video_path": ""},
+        )
+        moved += 1
+
+    source_metadata_path.write_text(
+        json.dumps(source_metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    target_metadata_path.write_text(
+        json.dumps(target_metadata, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    source_exists = _refresh_actor_after_face_change(source_dir)
+    _refresh_actor_after_face_change(target_dir)
+
+    if source_exists:
+        return f"{moved}枚を {source_actor_name} から {target_actor_name} へ移動しました"
+
+    return f"{moved}枚を {target_actor_name} へ移動し、空になった {source_actor_name} を削除しました"
 
 
 def get_similar_actor_choices(actor_name):

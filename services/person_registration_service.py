@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import re
 import shutil
 
@@ -72,6 +73,12 @@ def register_cluster_as_actor(video, cluster_name, actor_name):
 
     source_dir = FACES_DIR / video_id / cluster_name
     embedding_dir = EMBEDDINGS_DIR / video_id
+    source_metadata_path = FACES_DIR / video_id / "faces_metadata.json"
+
+    if source_metadata_path.exists():
+        source_metadata = json.loads(source_metadata_path.read_text(encoding="utf-8"))
+    else:
+        source_metadata = {}
 
     if not source_dir.is_dir():
         return "選択した人物クラスタが見つかりません"
@@ -90,6 +97,12 @@ def register_cluster_as_actor(video, cluster_name, actor_name):
     target_dir = PERSON_LIBRARY_DIR / actor_name
     target_faces_dir = target_dir / "faces"
     target_faces_dir.mkdir(parents=True, exist_ok=True)
+    target_metadata_path = target_dir / "faces_metadata.json"
+
+    if target_metadata_path.exists():
+        target_metadata = json.loads(target_metadata_path.read_text(encoding="utf-8"))
+    else:
+        target_metadata = {}
 
     _remove_duplicate_faces([embedding for _, _, embedding in records], target_dir)
 
@@ -105,6 +118,10 @@ def register_cluster_as_actor(video, cluster_name, actor_name):
 
         shutil.copy2(image_path, destination)
         shutil.copy2(embedding_path, destination.with_suffix(".npy"))
+        target_metadata[destination.name] = source_metadata.get(
+            image_path.name,
+            {"video_name": "元動画情報なし", "video_path": ""},
+        )
         added += 1
 
     representative_image = target_dir / "representative.jpg"
@@ -113,5 +130,9 @@ def register_cluster_as_actor(video, cluster_name, actor_name):
         shutil.copy2(records[0][0], representative_image)
 
     update_actor_embedding(actor_name)
+    target_metadata_path.write_text(
+        json.dumps(target_metadata, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
 
     return f"{cluster_name} を {actor_name} として登録しました（顔画像：{added}枚）"

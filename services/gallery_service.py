@@ -26,10 +26,20 @@ def load_gallery(video_name):
     if unknown.exists():
         folders.append(unknown)
 
+    unclassified = base_dir / "Unclassified"
+
+    if unclassified.exists():
+        folders.append(unclassified)
+
     for folder in folders:
 
         for image in sorted(folder.glob("*.jpg")):
 
-            gallery.append((str(image), folder.name.removeprefix("Actor_")))
+            label = folder.name.removeprefix("Actor_")
+
+            if folder.name == "Unclassified":
+                label = "未分類"
+
+            gallery.append((str(image), label))
 
     return gallery

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 import shutil
+import time
 
 import numpy as np
 from sklearn.cluster import DBSCAN
@@ -9,7 +10,8 @@ from config import CLUSTER_EPS, EMBEDDINGS_DIR, FACES_DIR
 from services.video_service import get_video_id
 
 
-def cluster_faces(video_name):
+def cluster_faces(video_name, should_cancel=None):
+    started_at = time.perf_counter()
     if not video_name:
         return "動画を選択してください"
 
@@ -36,13 +38,23 @@ def cluster_faces(video_name):
     else:
         assignments = {}
 
+    exclusions_path = face_dir / "manual_exclusions.json"
+    manual_exclusions = set(
+        json.loads(exclusions_path.read_text(encoding="utf-8"))
+        if exclusions_path.exists()
+        else []
+    )
+
     embeddings = []
     image_names = []
 
     for embedding_file in embedding_files:
+        if should_cancel and should_cancel():
+            return f"クラスタリングを中断しました（{time.perf_counter() - started_at:.1f}秒）"
+
         image_name = f"{embedding_file.stem}.jpg"
 
-        if image_name in assignments:
+        if image_name in assignments or image_name in manual_exclusions:
             continue
 
         embeddings.append(np.load(embedding_file))
@@ -56,6 +68,9 @@ def cluster_faces(video_name):
             min_samples=2,
             metric="cosine"
         ).fit_predict(embeddings)
+
+    if should_cancel and should_cancel():
+        return f"クラスタリングを中断しました（{time.perf_counter() - started_at:.1f}秒）"
 
     for pattern in ("Actor_*", "Person_*"):
         for folder in face_dir.glob(pattern):
@@ -109,8 +124,10 @@ def cluster_faces(video_name):
         "=== Cluster Result ===",
         "",
         f"顔画像 : {len(embedding_files)}",
+        f"DBSCAN対象 : {len(embeddings)}",
         f"出演者ライブラリ一致 : {len(assignments)}",
         f"人物数 : {len(created)}",
+        f"所要時間 : {time.perf_counter() - started_at:.1f}秒",
         "",
     ]
     summary.extend(result)

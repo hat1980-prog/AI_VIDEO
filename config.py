@@ -19,13 +19,16 @@ FRAME_INTERVAL = 180
 
 FRAME_FPS = f"1/{FRAME_INTERVAL}"
 
+# 長尺動画の顔サンプリングではキーフレームだけをデコードして高速化する
+FRAME_KEYFRAMES_ONLY = True
+
 FACE_MODEL = "buffalo_l"
 
 # GPU:0 / CPU:-1
 FACE_CTX = 0
 
 # 保存する顔画像の最小サイズ（短辺・px）
-MIN_FACE_SIZE = 256
+MIN_FACE_SIZE = 128
 
 # 人物クラスタリングの許容コサイン距離（大きいほど同一人物にまとめやすい）
 CLUSTER_EPS = 0.65
