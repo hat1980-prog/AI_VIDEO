@@ -8,6 +8,7 @@ from config import (
     PERSON_LIBRARY_SETTINGS_PATH,
     PERSON_SIMILARITY_MARGIN,
     PERSON_SIMILARITY_THRESHOLD,
+    PERSON_SIMILARITY_THRESHOLD_MAX,
     PERSON_SIMILARITY_THRESHOLD_MIN,
 )
 
@@ -111,9 +112,12 @@ def get_similarity_threshold():
 
 
 def calibrate_similarity_threshold(similarity):
+    # A confirmed manual merge is a fresh positive example.  Do not constrain
+    # the result by the previous value: doing so made the threshold monotonic
+    # decreasing and permanently pinned it at its minimum (0.45).
     adjusted_threshold = max(
         PERSON_SIMILARITY_THRESHOLD_MIN,
-        min(get_similarity_threshold(), similarity - PERSON_SIMILARITY_MARGIN),
+        min(PERSON_SIMILARITY_THRESHOLD_MAX, similarity - PERSON_SIMILARITY_MARGIN),
     )
     PERSON_LIBRARY_SETTINGS_PATH.write_text(
         json.dumps({"similarity_threshold": adjusted_threshold}, ensure_ascii=False, indent=2),
@@ -145,6 +149,7 @@ def find_similar_actor(embedding, threshold=None):
         "name": index["names"][best_index],
         "image": index["images"][best_index],
         "embedding": index["embeddings"][best_index],
+        "similarity": float(scores[best_index]),
     }
 
 

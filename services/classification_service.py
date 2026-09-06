@@ -2,9 +2,11 @@ import json
 from pathlib import Path
 import shutil
 
+import numpy as np
+
 from config import EMBEDDINGS_DIR, FACES_DIR, PERSON_LIBRARY_DIR
 from services.actor_service import load_actor_list
-from services.person_library_service import update_actor_embedding
+from services.person_library_service import load_all_persons, update_actor_embedding
 from services.video_service import get_video_id
 
 
@@ -43,6 +45,30 @@ def get_manual_targets(video):
         for actor_name in load_actor_list()
     )
     return targets
+
+
+def get_face_similarity_candidates(video, selected_face_path, limit=5):
+    """Return the closest registered actors for a selected extracted face."""
+    face_dir, embedding_dir = _paths(video)
+    if face_dir is None:
+        return []
+    filename = _validate_selected_face(face_dir, selected_face_path)
+    if filename is None:
+        return []
+    embedding_path = embedding_dir / f"{Path(filename).stem}.npy"
+    if not embedding_path.exists():
+        return []
+
+    embedding = np.load(embedding_path)
+    norm = np.linalg.norm(embedding)
+    if norm == 0:
+        return []
+    embedding = embedding / norm
+    candidates = []
+    for person in load_all_persons():
+        similarity = float(np.dot(person["embedding"], embedding))
+        candidates.append((person["name"], similarity))
+    return sorted(candidates, key=lambda candidate: candidate[1], reverse=True)[:limit]
 
 
 def _validate_selected_face(face_dir, selected_face_path):

@@ -4,6 +4,7 @@ import sqlite3
 
 import numpy as np
 
+from database.db import get_connection
 from config import (
     DATABASE_DIR,
     EMBEDDINGS_DIR,
@@ -63,7 +64,7 @@ def _delete_database_records(face_paths):
     if not DATABASE_PATH.exists():
         return
 
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
 
     try:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -84,7 +85,7 @@ def _delete_database_records(face_paths):
 
 
 def _record_excluded_face(source_face_path, excluded_embedding_path):
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
 
     try:
         conn.execute(

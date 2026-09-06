@@ -130,6 +130,7 @@ def extract_faces(video_name, progress_callback=None, should_cancel=None, frame_
     skipped_small_faces = []
     skipped_excluded_faces = 0
     matched_actors = {}
+    matched_actor_details = {}
     updated_actors = set()
     face_metadata = {}
     actor_metadata = {}
@@ -232,6 +233,10 @@ def extract_faces(video_name, progress_callback=None, should_cancel=None, frame_
 
                 actor_name = actor["name"]
                 matched_actors[face_filename] = actor_name
+                matched_actor_details[face_filename] = {
+                    "actor_name": actor_name,
+                    "similarity": round(actor["similarity"], 4),
+                }
 
             updated_actors.add(actor_name)
 
@@ -284,6 +289,10 @@ def extract_faces(video_name, progress_callback=None, should_cancel=None, frame_
         json.dumps(matched_actors, ensure_ascii=False, indent=2),
         encoding="utf-8"
     )
+    (face_dir / "assignment_details.json").write_text(
+        json.dumps(matched_actor_details, ensure_ascii=False, indent=2),
+        encoding="utf-8"
+    )
     (face_dir / "faces_metadata.json").write_text(
         json.dumps(face_metadata, ensure_ascii=False, indent=2),
         encoding="utf-8"
@@ -311,6 +320,17 @@ def extract_faces(video_name, progress_callback=None, should_cancel=None, frame_
         if len(low_resolution_faces) > log_limit:
             low_resolution_log += f"\n…ほか{len(low_resolution_faces) - log_limit}件"
 
+    assignment_log = ""
+    if matched_actor_details:
+        assignment_items = list(matched_actor_details.items())
+        displayed = assignment_items[:log_limit]
+        assignment_log = "\n自動分類結果:\n" + "\n".join(
+            f"{face_name} → {detail['actor_name']}（一致度: {detail['similarity']:.2f}）"
+            for face_name, detail in displayed
+        )
+        if len(assignment_items) > log_limit:
+            assignment_log += f"\n…ほか{len(assignment_items) - log_limit}件"
+
     message = (
         f"{count}枚の顔画像とEmbeddingを保存しました"
         f"（小さすぎる顔を{len(skipped_small_faces)}枚除外、"
@@ -320,7 +340,7 @@ def extract_faces(video_name, progress_callback=None, should_cancel=None, frame_
         f"\n処理フレーム: {processed_frames}/{total_frames}、所要時間: {time.perf_counter() - started_at:.1f}秒"
         f"\n同名動画の元動画パス統合: 出演者ライブラリ{normalized_actor_faces}枚、"
         f"抽出顔{normalized_extracted_faces}枚"
-        f"{low_resolution_log}"
+        f"{assignment_log}{low_resolution_log}"
     )
 
     if cancelled:
