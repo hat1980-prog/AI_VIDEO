@@ -13,6 +13,13 @@ from services.person_library_service import (
 )
 
 
+# The library is file based.  A refresh used to enumerate every actor folder
+# repeatedly: once for the video selector, once for the actor list, and again
+# while building the gallery.  Keep one read-only snapshot for a filesystem
+# generation and derive every view from it.  The fingerprint below changes on
+# every supported face/metadata/representative mutation, so this is not a
+# long-lived stale cache.
+_ACTOR_LIBRARY_INDEX_CACHE = {"fingerprint": None, "index": None}
 _ACTOR_RECORDS_CACHE = {"fingerprint": None, "records": {}}
 
 
@@ -336,64 +343,28 @@ def reclassify_actors(threshold=None, progress_callback=None, should_cancel=None
 
 
 def _actor_face_paths(actor_dir, source_video_path=None):
-    faces_dir = actor_dir / "faces"
-    faces = sorted(faces_dir.glob("*.jpg")) if faces_dir.exists() else []
+    actor = _actor_library_index()["actors"].get(actor_dir.name)
+    if actor is None:
+        return []
 
     if not source_video_path:
-        return faces
+        return list(actor["faces"])
 
-    metadata, _ = _load_face_metadata(actor_dir)
-    source_video_name = Path(source_video_path).name.casefold()
-    return [
-        face for face in faces
-        if Path(
-            metadata.get(face.name, {}).get("video_name")
-            or metadata.get(face.name, {}).get("video_path", "")
-        ).name.casefold() == source_video_name
-    ]
+    source_key = Path(source_video_path).name.casefold()
+    return list(actor["faces_by_video"].get(source_key, ()))
 
 
 def get_actor_video_choices(actor_name_filter=None):
-    records = {}
-    actor_video_names = set()
-
-    for actor_dir in PERSON_LIBRARY_DIR.iterdir():
-        if not actor_dir.is_dir():
-            continue
-
-        metadata, _ = _load_face_metadata(actor_dir)
-
-        for face_name, info in metadata.items():
-            video_path = info.get("video_path")
-
-            if not video_path:
-                continue
-
-            video_name = Path(info.get("video_name") or video_path).name
-            key = video_name.casefold()
-
-            if actor_name_filter and actor_dir.name == actor_name_filter:
-                actor_video_names.add(key)
-
-            face_path = actor_dir / "faces" / face_name
-            modified_at = face_path.stat().st_mtime_ns if face_path.exists() else 0
-            current = records.get(key)
-
-            if current is None or modified_at > current[2]:
-                records[key] = (video_name, video_path, modified_at)
-
-    choices = [
-        (video_name, video_path)
-        for video_name, video_path, _ in sorted(
-            records.values(), key=lambda record: (record[0].casefold(), record[1])
-        )
-    ]
+    index = _actor_library_index()
+    choices = index["video_choices"]
     if not actor_name_filter:
-        return choices
+        return list(choices)
 
     # Keep dropdown values stable when switching between video and actor filters.
     # A selected actor may only retain an old path for a video that was later
     # re-analysed elsewhere, but the UI must keep using the global canonical path.
+    actor = index["actors"].get(actor_name_filter)
+    actor_video_names = actor["video_names"] if actor else frozenset()
     return [choice for choice in choices if choice[0].casefold() in actor_video_names]
 
 
@@ -416,8 +387,93 @@ def _actor_records_fingerprint():
     return tuple(records)
 
 
-def _actor_records(source_video_path=None):
+def _actor_library_index():
+    """Return one immutable-ish snapshot shared by all library views.
+
+    Reading thousands of small JSON and image entries dominates this UI, not
+    SQLite.  Building the reverse video index while enumerating faces removes
+    the repeated scans without changing the on-disk data model.
+    """
     fingerprint = _actor_records_fingerprint()
+    cached = _ACTOR_LIBRARY_INDEX_CACHE
+    if cached["fingerprint"] == fingerprint and cached["index"] is not None:
+        return cached["index"]
+
+    actors = {}
+    video_records = {}
+
+    for actor_dir in PERSON_LIBRARY_DIR.iterdir():
+        if not actor_dir.is_dir():
+            continue
+
+        faces_dir = actor_dir / "faces"
+        faces = tuple(sorted(faces_dir.glob("*.jpg"))) if faces_dir.exists() else ()
+        metadata, _ = _load_face_metadata(actor_dir)
+        faces_by_video = {}
+        face_modified_at = {}
+
+        for face in faces:
+            try:
+                face_modified_at[face.name] = face.stat().st_mtime_ns
+            except OSError:
+                # A concurrently deleted face will be picked up on the next
+                # fingerprint refresh; omit it from this transient snapshot.
+                continue
+            info = metadata.get(face.name, {})
+            if not isinstance(info, dict):
+                continue
+            video_name = Path(
+                info.get("video_name") or info.get("video_path", "")
+            ).name
+            if video_name:
+                faces_by_video.setdefault(video_name.casefold(), []).append(face)
+
+        video_names = set()
+        for face_name, info in metadata.items():
+            if not isinstance(info, dict):
+                continue
+            video_path = info.get("video_path")
+            if not video_path:
+                continue
+            video_name = Path(info.get("video_name") or video_path).name
+            if not video_name:
+                continue
+            key = video_name.casefold()
+            video_names.add(key)
+            modified_at = face_modified_at.get(face_name, 0)
+            current = video_records.get(key)
+            if current is None or modified_at > current[2]:
+                video_records[key] = (video_name, video_path, modified_at)
+
+        representative = _representative_image(actor_dir)
+        actors[actor_dir.name] = {
+            "directory": actor_dir,
+            "faces": faces,
+            "faces_by_video": {
+                key: tuple(value) for key, value in faces_by_video.items()
+            },
+            "metadata": metadata,
+            "representative": representative,
+            "video_names": frozenset(video_names),
+        }
+
+    index = {
+        "actors": actors,
+        "video_choices": tuple(
+            (video_name, video_path)
+            for video_name, video_path, _ in sorted(
+                video_records.values(), key=lambda record: (record[0].casefold(), record[1])
+            )
+        ),
+    }
+    cached["fingerprint"] = fingerprint
+    cached["index"] = index
+    return index
+
+
+def _actor_records(source_video_path=None):
+    index = _actor_library_index()
+    fingerprint = _ACTOR_LIBRARY_INDEX_CACHE["fingerprint"]
     source_key = Path(source_video_path).name.casefold() if source_video_path else None
 
     if _ACTOR_RECORDS_CACHE["fingerprint"] != fingerprint:
@@ -430,22 +486,11 @@ def _actor_records(source_video_path=None):
 
     records = []
 
-    for actor_dir in PERSON_LIBRARY_DIR.iterdir():
-        if not actor_dir.is_dir() or not _representative_image(actor_dir):
+    for actor_name, actor in index["actors"].items():
+        if not actor["representative"]:
             continue
 
-        faces_dir = actor_dir / "faces"
-        faces = sorted(faces_dir.glob("*.jpg")) if faces_dir.exists() else []
-        metadata, _ = _load_face_metadata(actor_dir)
-
-        if source_key:
-            faces = [
-                face for face in faces
-                if Path(
-                    metadata.get(face.name, {}).get("video_name")
-                    or metadata.get(face.name, {}).get("video_path", "")
-                ).name.casefold() == source_key
-            ]
+        faces = actor["faces_by_video"].get(source_key, ()) if source_key else actor["faces"]
 
         face_count = len(faces)
 
@@ -455,14 +500,7 @@ def _actor_records(source_video_path=None):
         # Count unique source titles, not face images.  Filenames are used as
         # the canonical identity throughout the library so moved videos are
         # still treated as the same work.
-        video_names = {
-            Path(info.get("video_name") or info.get("video_path", "")).name.casefold()
-            for info in metadata.values()
-            if isinstance(info, dict)
-            and Path(info.get("video_name") or info.get("video_path", "")).name
-            and Path(info.get("video_name") or info.get("video_path", "")).name != "元動画情報なし"
-        }
-        records.append((actor_dir.name, face_count, len(video_names)))
+        records.append((actor_name, face_count, len(actor["video_names"])))
 
     _ACTOR_RECORDS_CACHE["records"][source_key] = tuple(records)
     return records
@@ -506,13 +544,17 @@ def load_actor_gallery(
     sort_by="name", sort_order="asc", source_video_path=None, actor_name_filter=None
 ):
     gallery = []
+    index = _actor_library_index()
+    source_key = Path(source_video_path).name.casefold() if source_video_path else None
 
     for actor_name in load_actor_list(
         sort_by, sort_order, source_video_path, actor_name_filter
     ):
-        actor_dir = PERSON_LIBRARY_DIR / actor_name
-        filtered_faces = _actor_face_paths(actor_dir, source_video_path)
-        image = filtered_faces[0] if source_video_path else _representative_image(actor_dir)
+        actor = index["actors"].get(actor_name)
+        if actor is None:
+            continue
+        filtered_faces = actor["faces_by_video"].get(source_key, ()) if source_key else ()
+        image = filtered_faces[0] if source_key else actor["representative"]
         gallery.append((str(image), actor_name))
 
     return gallery
@@ -532,8 +574,8 @@ def get_actor_details(actor_name, source_video_path=None):
         return "", [], "出演者を選択してください"
 
     faces = _actor_face_paths(actor_dir, source_video_path)
-    metadata_path = actor_dir / "faces_metadata.json"
-    metadata = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else {}
+    actor = _actor_library_index()["actors"].get(actor_name)
+    metadata = actor["metadata"] if actor else {}
     gallery = [
         (
             str(face),
@@ -612,6 +654,41 @@ def remove_actor_face(actor_name, selected_face_path):
         return f"{face_path.name} を {actor_name} の出演者ライブラリから除外しました"
 
     return f"{face_path.name} を除外し、顔画像がなくなったため {actor_name} を削除しました"
+
+
+def remove_actor_faces(actor_name, selected_face_paths):
+    """Remove multiple selected library faces with one metadata/embedding refresh."""
+    actor_dir = _actor_dir(actor_name)
+    if actor_dir is None:
+        return "出演者を選択してください"
+
+    face_paths = []
+    seen = set()
+    for selected_path in selected_face_paths or []:
+        validated_dir, face_path = _validate_actor_face(actor_name, selected_path)
+        if validated_dir is None or face_path in seen:
+            continue
+        seen.add(face_path)
+        face_paths.append(face_path)
+
+    if not face_paths:
+        return "ライブラリから除外する顔画像を1枚以上選択してください"
+
+    metadata, metadata_path = _load_face_metadata(actor_dir)
+    for face_path in face_paths:
+        embedding_path = face_path.with_suffix(".npy")
+        face_path.unlink()
+        if embedding_path.exists():
+            embedding_path.unlink()
+        metadata.pop(face_path.name, None)
+
+    metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+    actor_exists = _refresh_actor_after_face_change(actor_dir)
+
+    if actor_exists:
+        return f"{len(face_paths)}枚を {actor_name} の出演者ライブラリから除外しました"
+
+    return f"{len(face_paths)}枚を除外し、顔画像がなくなったため {actor_name} を削除しました"
 
 
 def set_actor_representative_image(actor_name, selected_face_path):

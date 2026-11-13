@@ -1,7 +1,10 @@
 from pathlib import Path
+from contextlib import redirect_stdout
+from io import StringIO
 import json
 import cv2
 import numpy as np
+import onnxruntime as ort
 import shutil
 import time
 
@@ -50,9 +53,34 @@ from services.video_service import get_video_id, get_video_path
 from services.exclusion_service import is_excluded_face
 from services.source_video_service import normalize_source_video_paths
 
+def _create_face_analysis():
+    """Initialize InsightFace with an actually available execution provider."""
+    available_providers = set(ort.get_available_providers())
+    ctx_id = FACE_CTX
+
+    # InsightFace requests CUDA whenever ctx_id is non-negative.  On a CPU-only
+    # onnxruntime install this only produces a warning before falling back to
+    # CPU, so select CPU explicitly instead.
+    if ctx_id >= 0 and "CUDAExecutionProvider" not in available_providers:
+        ctx_id = -1
+
+    providers = (
+        ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        if ctx_id >= 0
+        else ["CPUExecutionProvider"]
+    )
+
+    # InsightFace emits one line per model during normal startup.  These are
+    # informational and obscure the application's own runtime log.
+    with redirect_stdout(StringIO()):
+        face_app = FaceAnalysis(name=FACE_MODEL, providers=providers)
+        face_app.prepare(ctx_id=ctx_id)
+
+    return face_app
+
+
 # InsightFace初期化
-app = FaceAnalysis(name=FACE_MODEL)
-app.prepare(ctx_id=FACE_CTX)
+app = _create_face_analysis()
 
 
 def remove_small_faces(face_dir, embedding_dir):
@@ -202,6 +230,9 @@ def extract_faces(video_name, progress_callback=None, should_cancel=None, frame_
 
             face_filename = f"{image_file.stem}_{i+1}.jpg"
             face_metadata[face_filename] = {
+                # Persist the stable filesystem identity so a later rename or
+                # move can update this source label without relying on names.
+                "video_id": video_id,
                 "video_name": video_path.name,
                 "video_path": str(video_path),
                 **_get_frame_time_info(image_file, extraction_interval),

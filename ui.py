@@ -1,10 +1,11 @@
 from pathlib import Path
+import re
 from time import perf_counter
 
 import gradio as gr
 
 from config import FRAME_INTERVAL, VIDEOS_DIR
-from services.video_service import get_video_list
+from services.video_service import get_video_list, update_video_file_info
 from services.database_viewer_service import get_database_tables, get_table_data
 from services.exclusion_service import exclude_face
 from services.person_registration_service import register_cluster_as_actor
@@ -34,6 +35,7 @@ from services.actor_service import (
     reclassify_actor_face,
     reclassify_actor_faces,
     remove_actor_face,
+    remove_actor_faces,
     set_actor_representative_image,
 )
 from services.person_library_service import get_similarity_threshold
@@ -56,6 +58,30 @@ def refresh(scan_directory, exclude_analyzed, progress=gr.Progress()):
         gr.update(choices=choices, value=None),
         gr.update(choices=choices, value=[]),
         f"{len(choices)}件の動画を検出しました",
+    )
+
+
+def refresh_video_file_info(scan_directory, exclude_analyzed, progress=gr.Progress()):
+    """Refresh filename/path metadata for files found below the scan folder."""
+    progress(0.05, desc="動画ファイル識別子を確認しています")
+
+    def update_progress(current, total):
+        ratio = current / total if total else 1.0
+        progress(ratio * 0.85, desc=f"ファイル情報を確認しています（{current}/{total}件）")
+
+    scanned, renamed, metadata_updates = update_video_file_info(
+        scan_directory, update_progress
+    )
+    progress(0.9, desc="動画一覧を更新しています")
+    choices = get_video_list(scan_directory, exclude_analyzed)
+    progress(1.0, desc="ファイル情報を更新しました")
+    return (
+        gr.update(choices=choices, value=None),
+        gr.update(choices=choices, value=[]),
+        (
+            f"{scanned}件を確認。名前またはパスを変更した解析済み動画：{renamed}件、"
+            f"顔画像の紐づけ更新：{metadata_updates}件。"
+        ),
     )
 
 
@@ -337,6 +363,29 @@ def select_actor_face(actor_name, source_video_path, selected_face_paths, evt: g
     )
 
 
+def select_all_actor_faces_for_move(actor_name, source_video_path):
+    """Select every face currently displayed for the selected actor."""
+    if not actor_name:
+        return (
+            None,
+            "出演者を選択してください",
+            gr.update(choices=[], value=None),
+            [],
+            [],
+        )
+
+    _, faces, _ = get_actor_details(actor_name, source_video_path)
+    selected_paths = [face_path for face_path, _ in faces]
+    targets = [name for name in load_actor_list() if name != actor_name]
+    return (
+        None,
+        f"表示中の顔画像をすべて移動対象に選択しました（{len(selected_paths)}枚）",
+        gr.update(choices=targets, value=None),
+        selected_paths,
+        faces,
+    )
+
+
 def _actor_face_operation_outputs(
     source_actor_name, sort_by, sort_order, source_video_path, actor_name_filter, message
 ):
@@ -380,6 +429,20 @@ def remove_selected_actor_face(
         actor_name, sort_by, sort_order, source_video_path, actor_name_filter, message
     )
     progress(1.0, desc="顔画像の除外が完了しました")
+    return outputs
+
+
+def remove_selected_actor_faces(
+    actor_name, face_paths, sort_by, sort_order, source_video_path, actor_name_filter,
+    progress=gr.Progress(),
+):
+    progress(0.1, desc="選択した複数の顔画像を出演者ライブラリから除外しています")
+    message = remove_actor_faces(actor_name, face_paths)
+    progress(0.85, desc="出演者ライブラリを更新しています")
+    outputs = _actor_face_operation_outputs(
+        actor_name, sort_by, sort_order, source_video_path, actor_name_filter, message
+    )
+    progress(1.0, desc="複数画像の除外が完了しました")
     return outputs
 
 
@@ -570,7 +633,21 @@ def refresh_bulk_merge_actor_choices(
     # multiple Person entries for bulk merging.
     similarity_reference = actor_name_filter if sort_by == "similarity" else None
     choices = load_actor_list(sort_by, sort_order, source_video_path, similarity_reference)
-    return gr.update(choices=choices, value=[]), gr.update(choices=choices, value=None)
+    # A bulk-merge destination should be an identified actor.  Keep Person
+    # entries available as sources, but do not offer another unclassified
+    # entry as the target.
+    target_choices = [name for name in choices if not re.fullmatch(r"Person\d+", name)]
+    return gr.update(choices=choices, value=[]), gr.update(choices=target_choices, value=None)
+
+
+def select_all_generated_bulk_merge_sources(
+    sort_by="name", sort_order="asc", source_video_path=None, actor_name_filter=None,
+):
+    """Select all currently visible auto-generated Person entries for bulk merge."""
+    similarity_reference = actor_name_filter if sort_by == "similarity" else None
+    choices = load_actor_list(sort_by, sort_order, source_video_path, similarity_reference)
+    generated_names = [name for name in choices if re.fullmatch(r"Person\d+", name)]
+    return gr.update(choices=choices, value=generated_names)
 
 
 def refresh_all_bulk_actor_choices(
@@ -779,6 +856,7 @@ def create_ui():
 
         with gr.Row():
             refresh_btn = gr.Button("更新")
+            refresh_file_info_btn = gr.Button("ファイル情報を更新")
             frame_btn = gr.Button("Extract Frames")
             face_btn = gr.Button("Extract Faces")
             cluster_btn = gr.Button("Cluster Faces")
@@ -886,9 +964,13 @@ def create_ui():
             )
             bulk_merge_target_name = gr.Dropdown(
                 label="一括統合先の出演者",
-                choices=load_actor_list(),
+                choices=[
+                    name for name in load_actor_list()
+                    if not re.fullmatch(r"Person\d+", name)
+                ],
             )
             refresh_bulk_merge_choices_btn = gr.Button("統合候補を更新")
+            select_all_generated_merge_btn = gr.Button("Person形式を一括選択")
         bulk_merge_confirm = gr.Checkbox(
             label="選択した出演者を統合先へまとめて移動することを確認しました"
         )
@@ -906,6 +988,7 @@ def create_ui():
             label="顔画像一覧（クリックで移動対象に追加・解除）", columns=6, rows=2, height=260,
             object_fit="contain", preview=True,
         )
+        select_all_actor_faces_btn = gr.Button("表示中の顔画像を移動対象に一括選択")
         selected_actor_faces = gr.State([])
         selected_actor_faces_gallery = gr.Gallery(
             label="移動対象の顔画像", columns=6, rows=1, height=160,
@@ -914,7 +997,11 @@ def create_ui():
         batch_actor_target = gr.Textbox(
             label="複数画像の移動先出演者名（新規または既存）",
         )
-        move_actor_faces_btn = gr.Button("選択した複数画像を別の出演者へ移動")
+        with gr.Row():
+            move_actor_faces_btn = gr.Button("選択した複数画像を別の出演者へ移動")
+            remove_actor_faces_btn = gr.Button(
+                "選択した複数画像をライブラリから除外", variant="stop"
+            )
         selected_actor_face = gr.State()
         actor_face_detail = gr.Textbox(
             label="選択した出演者の顔画像",
@@ -956,6 +1043,11 @@ def create_ui():
             inputs=[scan_directory, exclude_analyzed_videos],
             outputs=[video, batch_videos, result],
         )
+        refresh_file_info_btn.click(
+            refresh_video_file_info,
+            inputs=[scan_directory, exclude_analyzed_videos],
+            outputs=[video, batch_videos, result],
+        )
         select_all_batch_btn.click(
             select_all_batch_videos,
             inputs=[scan_directory, exclude_analyzed_videos],
@@ -971,8 +1063,10 @@ def create_ui():
             outputs=[delete_video_data_confirm, gallery, result],
         )
         cluster_btn.click(cluster_and_gallery, video, outputs=[result, gallery])
-        analyze_btn.click(analyze_video, [video, frame_interval], outputs=[result, gallery])
-        batch_analyze_btn.click(
+        analyze_event = analyze_btn.click(
+            analyze_video, [video, frame_interval], outputs=[result, gallery]
+        )
+        batch_analyze_event = batch_analyze_btn.click(
             analyze_multiple_videos,
             [batch_videos, frame_interval],
             outputs=[result, gallery],
@@ -1033,6 +1127,31 @@ def create_ui():
             selected_actor_faces,
             selected_actor_faces_gallery,
         ]
+
+        # Keep the actor library in sync with faces registered by either a
+        # single Analyze run or a consecutive Analyze run.  This deliberately
+        # uses the same handlers as the visible "出演者更新" button so filters
+        # and all destructive-operation candidate lists stay consistent too.
+        analyze_library_refresh = analyze_event.then(
+            refresh_actor_library,
+            inputs=[actor_sort_by, actor_sort_order, actor_video_filter, actor_name_filter],
+            outputs=actor_filter_outputs,
+        )
+        analyze_library_refresh.then(
+            refresh_all_bulk_actor_choices,
+            inputs=[actor_sort_by, actor_sort_order, actor_video_filter, actor_name_filter],
+            outputs=[bulk_delete_actor_names, bulk_merge_source_names, bulk_merge_target_name],
+        )
+        batch_analyze_library_refresh = batch_analyze_event.then(
+            refresh_actor_library,
+            inputs=[actor_sort_by, actor_sort_order, actor_video_filter, actor_name_filter],
+            outputs=actor_filter_outputs,
+        )
+        batch_analyze_library_refresh.then(
+            refresh_all_bulk_actor_choices,
+            inputs=[actor_sort_by, actor_sort_order, actor_video_filter, actor_name_filter],
+            outputs=[bulk_delete_actor_names, bulk_merge_source_names, bulk_merge_target_name],
+        )
 
         refresh_library_event = refresh_actor_btn.click(
             refresh_actor_library,
@@ -1129,6 +1248,17 @@ def create_ui():
                 selected_actor_faces_gallery,
             ],
         )
+        select_all_actor_faces_btn.click(
+            select_all_actor_faces_for_move,
+            inputs=[selected_actor, actor_video_filter],
+            outputs=[
+                selected_actor_face,
+                actor_face_detail,
+                actor_face_target,
+                selected_actor_faces,
+                selected_actor_faces_gallery,
+            ],
+        )
         merge_target.change(
             update_merge_result_name,
             inputs=[selected_actor, merge_target],
@@ -1199,6 +1329,11 @@ def create_ui():
             refresh_all_bulk_actor_choices,
             inputs=[actor_sort_by, actor_sort_order, actor_video_filter, actor_name_filter],
             outputs=[bulk_delete_actor_names, bulk_merge_source_names, bulk_merge_target_name],
+        )
+        select_all_generated_merge_btn.click(
+            select_all_generated_bulk_merge_sources,
+            inputs=[actor_sort_by, actor_sort_order, actor_video_filter, actor_name_filter],
+            outputs=bulk_merge_source_names,
         )
         bulk_delete_event.then(
             refresh_all_bulk_actor_choices,
@@ -1340,6 +1475,23 @@ def create_ui():
             outputs=[*actor_face_operation_outputs, batch_actor_target],
         )
         move_actor_faces_event.then(
+            refresh_all_bulk_actor_choices,
+            inputs=[actor_sort_by, actor_sort_order, actor_video_filter, actor_name_filter],
+            outputs=[bulk_delete_actor_names, bulk_merge_source_names, bulk_merge_target_name],
+        )
+        remove_actor_faces_event = remove_actor_faces_btn.click(
+            remove_selected_actor_faces,
+            inputs=[
+                selected_actor,
+                selected_actor_faces,
+                actor_sort_by,
+                actor_sort_order,
+                actor_video_filter,
+                actor_name_filter,
+            ],
+            outputs=actor_face_operation_outputs,
+        )
+        remove_actor_faces_event.then(
             refresh_all_bulk_actor_choices,
             inputs=[actor_sort_by, actor_sort_order, actor_video_filter, actor_name_filter],
             outputs=[bulk_delete_actor_names, bulk_merge_source_names, bulk_merge_target_name],
